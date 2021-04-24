@@ -40,6 +40,7 @@ import re
 from tensorflow.python.platform import gfile
 import math
 from six import iteritems
+import bcolz
 
 def triplet_loss(anchor, positive, negative, alpha):
     """Calculate the triplet loss according to the FaceNet paper
@@ -101,40 +102,42 @@ RANDOM_FLIP = 4
 FIXED_STANDARDIZATION = 8
 FLIP = 16
 def create_input_pipeline(input_queue, image_size, nrof_preprocess_threads, batch_size_placeholder):
-    images_and_labels_list = []
-    for _ in range(nrof_preprocess_threads):
-        filenames, label, control = input_queue.dequeue()
-        images = []
-        for filename in tf.unstack(filenames):
-            file_contents = tf.read_file(filename)
-            image = tf.image.decode_image(file_contents, 3)
-            image = tf.cond(get_control_flag(control[0], RANDOM_ROTATE),
-                            lambda:tf.py_func(random_rotate_image, [image], tf.uint8), 
-                            lambda:tf.identity(image))
-            image = tf.cond(get_control_flag(control[0], RANDOM_CROP), 
-                            lambda:tf.random_crop(image, image_size + (3,)), 
-                            lambda:tf.image.resize_image_with_crop_or_pad(image, image_size[0], image_size[1]))
-            image = tf.cond(get_control_flag(control[0], RANDOM_FLIP),
-                            lambda:tf.image.random_flip_left_right(image),
-                            lambda:tf.identity(image))
-            image = tf.cond(get_control_flag(control[0], FIXED_STANDARDIZATION),
-                            lambda:(tf.cast(image, tf.float32) - 127.5)/128.0,
-                            lambda:tf.image.per_image_standardization(image))
-            image = tf.cond(get_control_flag(control[0], FLIP),
-                            lambda:tf.image.flip_left_right(image),
-                            lambda:tf.identity(image))
-            #pylint: disable=no-member
-            image.set_shape(image_size + (3,))
-            images.append(image)
-        images_and_labels_list.append([images, label])
+    with tf.Graph().as_default():
+        images_and_labels_list = []
+        for _ in range(nrof_preprocess_threads):
+            filenames, label, control = input_queue.dequeue()
+            images = []
+            for filename in tf.unstack(filenames):
+                file_contents = tf.read_file(filename)
+                image = tf.image.decode_image(file_contents, 3)
+                image = tf.cond(get_control_flag(control[0], RANDOM_ROTATE),
+                                lambda:tf.py_func(random_rotate_image, [image], tf.uint8),
+                                lambda:tf.identity(image))
+                image = tf.cond(get_control_flag(control[0], RANDOM_CROP),
+                                lambda:tf.random_crop(image, image_size + (3,)),
+                                lambda:tf.image.resize_image_with_crop_or_pad(image, image_size[0], image_size[1]))
+                image = tf.cond(get_control_flag(control[0], RANDOM_FLIP),
+                                lambda:tf.image.random_flip_left_right(image),
+                                lambda:tf.identity(image))
+                image = tf.to_float(image)
+                image = tf.cond(get_control_flag(control[0], FIXED_STANDARDIZATION),
+                                lambda:(tf.cast(image, tf.float32) - 127.5)/128.0,
+                                lambda:tf.image.per_image_standardization(image))
+                image = tf.cond(get_control_flag(control[0], FLIP),
+                                lambda:tf.image.flip_left_right(image),
+                                lambda:tf.identity(image))
+                #pylint: disable=no-member
+                image.set_shape(image_size + (3,))
+                images.append(image)
+            images_and_labels_list.append([images, label])
 
-    image_batch, label_batch = tf.train.batch_join(
-        images_and_labels_list, batch_size=batch_size_placeholder, 
-        shapes=[image_size + (3,), ()], enqueue_many=True,
-        capacity=4 * nrof_preprocess_threads * 100,
-        allow_smaller_final_batch=True)
-    
-    return image_batch, label_batch
+        image_batch, label_batch = tf.train.batch_join(
+            images_and_labels_list, batch_size=batch_size_placeholder,
+            shapes=[image_size + (3,), ()], enqueue_many=True,
+            capacity=4 * nrof_preprocess_threads * 100,
+            allow_smaller_final_batch=True)
+
+        return image_batch, label_batch
 
 def get_control_flag(control, field):
     return tf.equal(tf.mod(tf.floor_div(control, field), 2), 1)
@@ -251,8 +254,16 @@ def load_data(image_paths, do_random_crop, do_random_flip, image_size, do_prewhi
             img = prewhiten(img)
         img = crop(img, do_random_crop, image_size)
         img = flip(img, do_random_flip)
+        #img = (img.astype('float') - 127.5) / 128
         images[i,:,:,:] = img
     return images
+
+def load_data_blp(path, name):
+    carray = bcolz.carray(rootdir=os.path.join(path, name), mode='r')
+    issame = np.load('{}/{}_list.npy'.format(path, name))
+    carray = np.flip((np.transpose(carray, (0, 2, 3, 1)) + 1) / 2, 3)
+    images = np.array([misc.imresize(img, (160, 160), interp='bilinear') for img in carray])
+    return images, issame
 
 def get_label_batch(label_data, batch_size, batch_index):
     nrof_examples = np.size(label_data, 0)
@@ -313,8 +324,8 @@ class ImageClass():
   
     def __len__(self):
         return len(self.image_paths)
-  
-def get_dataset(path, has_class_directories=True):
+    
+def get_dataset(path, has_class_directories=True, is_ytf=False):
     dataset = []
     path_exp = os.path.expanduser(path)
     classes = [path for path in os.listdir(path_exp) \
@@ -324,9 +335,18 @@ def get_dataset(path, has_class_directories=True):
     for i in range(nrof_classes):
         class_name = classes[i]
         facedir = os.path.join(path_exp, class_name)
-        image_paths = get_image_paths(facedir)
+        if is_ytf:
+            image_paths = get_image_paths_ytf(facedir)
+        else:
+            image_paths = get_image_paths(facedir)
         dataset.append(ImageClass(class_name, image_paths))
   
+    return dataset
+
+def get_dataset_flat(path):
+    dataset = []
+    for file in os.listdir(path):
+        dataset.append(ImageClass(file, [os.path.join(path, file)]))
     return dataset
 
 def get_image_paths(facedir):
@@ -334,6 +354,15 @@ def get_image_paths(facedir):
     if os.path.isdir(facedir):
         images = os.listdir(facedir)
         image_paths = [os.path.join(facedir,img) for img in images]
+    return image_paths
+
+def get_image_paths_ytf(facedir):
+    image_paths = []
+    if os.path.isdir(facedir):
+        for video in os.listdir(facedir):
+            video_path = os.path.join(facedir, video)
+            images = os.listdir(os.path.join(facedir, video))
+            image_paths.extend([os.path.join(video_path, img) for img in images])
     return image_paths
   
 def split_dataset(dataset, split_ratio, min_nrof_images_per_class, mode):

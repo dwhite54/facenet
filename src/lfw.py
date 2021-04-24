@@ -43,27 +43,40 @@ def evaluate(embeddings, actual_issame, nrof_folds=10, distance_metric=0, subtra
         np.asarray(actual_issame), 1e-3, nrof_folds=nrof_folds, distance_metric=distance_metric, subtract_mean=subtract_mean)
     return tpr, fpr, accuracy, val, val_std, far
 
+# def get_paths(lfw_dir, pairs):
+#     nrof_skipped_pairs = 0
+#     path_list = []
+#     issame_list = []
+#     for pair in pairs:
+#         if len(pair) == 3: # same ID
+#             path0 = add_extension(os.path.join(lfw_dir, pair[0], pair[0] + '_' + '%04d' % int(pair[1])))
+#             path1 = add_extension(os.path.join(lfw_dir, pair[0], pair[0] + '_' + '%04d' % int(pair[2])))
+#             issame = True
+#         elif len(pair) == 4: # not same ID
+#             path0 = add_extension(os.path.join(lfw_dir, pair[0], pair[0] + '_' + '%04d' % int(pair[1])))
+#             path1 = add_extension(os.path.join(lfw_dir, pair[2], pair[2] + '_' + '%04d' % int(pair[3])))
+#             issame = False
+#         if os.path.exists(path0) and os.path.exists(path1):    # Only add the pair if both paths exist
+#             path_list += (path0,path1)
+#             issame_list.append(issame)
+#         else:
+#             nrof_skipped_pairs += 1
+#     if nrof_skipped_pairs>0:
+#         print('Skipped %d image pairs' % nrof_skipped_pairs)
+#
+#     return path_list, issame_list
+
 def get_paths(lfw_dir, pairs):
-    nrof_skipped_pairs = 0
+    import os
     path_list = []
-    issame_list = []
-    for pair in pairs:
-        if len(pair) == 3:
-            path0 = add_extension(os.path.join(lfw_dir, pair[0], pair[0] + '_' + '%04d' % int(pair[1])))
-            path1 = add_extension(os.path.join(lfw_dir, pair[0], pair[0] + '_' + '%04d' % int(pair[2])))
-            issame = True
-        elif len(pair) == 4:
-            path0 = add_extension(os.path.join(lfw_dir, pair[0], pair[0] + '_' + '%04d' % int(pair[1])))
-            path1 = add_extension(os.path.join(lfw_dir, pair[2], pair[2] + '_' + '%04d' % int(pair[3])))
-            issame = False
-        if os.path.exists(path0) and os.path.exists(path1):    # Only add the pair if both paths exist
-            path_list += (path0,path1)
-            issame_list.append(issame)
-        else:
-            nrof_skipped_pairs += 1
-    if nrof_skipped_pairs>0:
-        print('Skipped %d image pairs' % nrof_skipped_pairs)
-    
+    for root, dirs, filenames in os.walk(lfw_dir):
+        for filename in filenames:
+            fullpath = os.path.join(root, filename)
+            if fullpath.lower().endswith('.jpg') or fullpath.lower().endswith('.png'):
+                path_list.append(fullpath)
+            else: print('skipping', fullpath)
+    issame_list = np.ones((len(path_list)//2, 1))
+    path_list = np.sort(np.array(path_list))
     return path_list, issame_list
   
 def add_extension(path):

@@ -48,10 +48,11 @@ def main(args):
         with tf.Session() as sess:
             
             # Read the file containing the pairs used for testing
-            pairs = lfw.read_pairs(os.path.expanduser(args.lfw_pairs))
+            pairs = None#lfw.read_pairs(os.path.expanduser(args.lfw_pairs))
 
             # Get the paths for the corresponding images
-            paths, actual_issame = lfw.get_paths(os.path.expanduser(args.lfw_dir), pairs)
+            ijbc_meta = np.load('/s/red/b/nobackup/data/portable/tbiom/models/insightface/evaluation/IJB/IJBC_backup.npz')
+            paths, actual_issame = [os.path.join(args.input_path, img_name.split('/')[-1]) for img_name in ijbc_meta['img_names']], None#lfw.get_paths(os.path.expanduser(args.lfw_dir), pairs)
             
             image_paths_placeholder = tf.placeholder(tf.string, shape=(None,1), name='image_paths')
             labels_placeholder = tf.placeholder(tf.int32, shape=(None,1), name='labels')
@@ -70,7 +71,7 @@ def main(args):
      
             # Load the model
             input_map = {'image_batch': image_batch, 'label_batch': label_batch, 'phase_train': phase_train_placeholder}
-            facenet.load_model(args.model, input_map=input_map)
+            facenet.load_model(args.model_path, input_map=input_map)
 
             # Get output tensor
             embeddings = tf.get_default_graph().get_tensor_by_name("embeddings:0")
@@ -80,16 +81,17 @@ def main(args):
 
             evaluate(sess, eval_enqueue_op, image_paths_placeholder, labels_placeholder, phase_train_placeholder, batch_size_placeholder, control_placeholder,
                 embeddings, label_batch, paths, actual_issame, args.lfw_batch_size, args.lfw_nrof_folds, args.distance_metric, args.subtract_mean,
-                args.use_flipped_images, args.use_fixed_image_standardization)
+                args.use_flipped_images, args.use_fixed_image_standardization, args.output_path)
 
               
 def evaluate(sess, enqueue_op, image_paths_placeholder, labels_placeholder, phase_train_placeholder, batch_size_placeholder, control_placeholder,
-        embeddings, labels, image_paths, actual_issame, batch_size, nrof_folds, distance_metric, subtract_mean, use_flipped_images, use_fixed_image_standardization):
+        embeddings, labels, image_paths, actual_issame, batch_size, nrof_folds, distance_metric, subtract_mean, use_flipped_images, use_fixed_image_standardization, output_path):
     # Run forward pass to calculate embeddings
     print('Runnning forward pass on LFW images')
     
     # Enqueue one epoch of image paths and labels
-    nrof_embeddings = len(actual_issame)*2  # nrof_pairs * nrof_images_per_pair
+    #nrof_embeddings = len(actual_issame)*2  # nrof_pairs * nrof_images_per_pair
+    nrof_embeddings = len(image_paths)
     nrof_flips = 2 if use_flipped_images else 1
     nrof_images = nrof_embeddings * nrof_flips
     labels_array = np.expand_dims(np.arange(0,nrof_images),1)
@@ -103,11 +105,17 @@ def evaluate(sess, enqueue_op, image_paths_placeholder, labels_placeholder, phas
     sess.run(enqueue_op, {image_paths_placeholder: image_paths_array, labels_placeholder: labels_array, control_placeholder: control_array})
     
     embedding_size = int(embeddings.get_shape()[1])
-    assert nrof_images % batch_size == 0, 'The number of LFW images must be an integer multiple of the LFW batch size'
-    nrof_batches = nrof_images // batch_size
+    #assert nrof_images % batch_size == 0, 'The number of LFW images must be an integer multiple of the LFW batch size'
+    if nrof_images % batch_size == 0:
+        nrof_batches = (nrof_images // batch_size)
+    else:
+        nrof_batches = (nrof_images // batch_size) + 1
     emb_array = np.zeros((nrof_images, embedding_size))
     lab_array = np.zeros((nrof_images,))
+    path_array = np.array((nrof_images,), dtype='object')
     for i in range(nrof_batches):
+        if i == nrof_batches - 1:
+            batch_size = nrof_images % batch_size
         feed_dict = {phase_train_placeholder:False, batch_size_placeholder:batch_size}
         emb, lab = sess.run([embeddings, labels], feed_dict=feed_dict)
         lab_array[lab] = lab
@@ -116,14 +124,22 @@ def evaluate(sess, enqueue_op, image_paths_placeholder, labels_placeholder, phas
             print('.', end='')
             sys.stdout.flush()
     print('')
-    embeddings = np.zeros((nrof_embeddings, embedding_size*nrof_flips))
+    #embeddings = np.zeros((nrof_embeddings, embedding_size*nrof_flips))
+    embeddings = np.zeros((nrof_embeddings, embedding_size))
     if use_flipped_images:
         # Concatenate embeddings for flipped and non flipped version of the images
-        embeddings[:,:embedding_size] = emb_array[0::2,:]
-        embeddings[:,embedding_size:] = emb_array[1::2,:]
+        #embeddings[:,:embedding_size] = emb_array[0::2,:]
+        #embeddings[:,embedding_size:] = emb_array[1::2,:]
+        embeddings = emb_array[0::2] + emb_array[1::2]
     else:
         embeddings = emb_array
 
+    np.save(output_path, embeddings)
+    #np.save('ijbc_issame.npy'.format(embedding_dir), actual_issame)
+        
+    #np.save('{}/ijbc_paths.npy'.format(embedding_dir), image_paths_array)
+        #np.save('{}/lfw_labels.npy'.format(embedding_dir), labels_array)
+    return
     assert np.array_equal(lab_array, np.arange(nrof_images))==True, 'Wrong labels used for evaluation, possibly caused by training examples left in the input pipeline'
     tpr, fpr, accuracy, val, val_std, far = lfw.evaluate(embeddings, actual_issame, nrof_folds=nrof_folds, distance_metric=distance_metric, subtract_mean=subtract_mean)
     
@@ -138,11 +154,11 @@ def evaluate(sess, enqueue_op, image_paths_placeholder, labels_placeholder, phas
 def parse_arguments(argv):
     parser = argparse.ArgumentParser()
     
-    parser.add_argument('lfw_dir', type=str,
+    parser.add_argument('--input_path', type=str,
         help='Path to the data directory containing aligned LFW face patches.')
     parser.add_argument('--lfw_batch_size', type=int,
         help='Number of images to process in a batch in the LFW test set.', default=100)
-    parser.add_argument('model', type=str, 
+    parser.add_argument('--model_path', type=str, 
         help='Could be either a directory containing the meta_file and ckpt_file or a model protobuf (.pb) file')
     parser.add_argument('--image_size', type=int,
         help='Image size (height, width) in pixels.', default=160)
@@ -158,6 +174,8 @@ def parse_arguments(argv):
         help='Subtract feature mean before calculating distance.', action='store_true')
     parser.add_argument('--use_fixed_image_standardization', 
         help='Performs fixed standardization of images.', action='store_true')
+    parser.add_argument('--output_path', type=str,
+        help='Specifies where to save embeddings, if specified.')
     return parser.parse_args(argv)
 
 if __name__ == '__main__':
